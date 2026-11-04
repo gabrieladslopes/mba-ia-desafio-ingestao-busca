@@ -2,7 +2,10 @@ import os
 from pathlib import Path
 
 from dotenv import load_dotenv
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import PromptTemplate
+from langchain_core.runnables import RunnableLambda
+from langchain_google_genai import ( ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings )
 from langchain_postgres import PGVector
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -74,40 +77,48 @@ def search_documents(question, vector_store):
     )
 
 def search_prompt(question=None, vector_store=None):
-    if not isinstance(question, str) or not question.strip():
-        raise ValueError("Informe uma pergunta não vazia.")
+    llm_model = os.getenv("LLM_MODEL")
 
-    if vector_store is None:
-        vector_store = create_vector_store()
-    
-    results = search_documents(question, vector_store)
-
-    context = "\n".join(document.page_content for document, distance in results)
-
-    return PROMPT_TEMPLATE.format(contexto=context, pergunta=question.strip())
-
-def main():
-    question = input("Digite uma pergunta para testar a busca: ").strip()
-
-    if not question:
-        print("Nenhuma pergunta informada.")
-        return
+    if not llm_model or not llm_model.strip():
+        raise ValueError("Configure a variável LLM_MODEL no arquivo .env.")
 
     vector_store = create_vector_store()
 
-    print("Buscando os trechos mais próximos.")
-    results = search_documents(question, vector_store)
+    llm = ChatGoogleGenerativeAI(
+        model=llm_model,
+        max_tokens=1024,
+        timeout=60,
+        max_retries=0,
+    )
 
-    print(f"Resultados recuperados: {len(results)}")
-    
-    for position, (document, distance) in enumerate(results, start=1):
-        page = document.metadata.get("page")
-        page_display = page + 1 if isinstance(page, int) else "não informada"
+    prompt = PromptTemplate.from_template(PROMPT_TEMPLATE)
 
-        print(f"\n--- Resultado {position} ---")
-        print(f"Distância: {distance:.4f}")
-        print(f"Página: {page_display}")
-        print(document.page_content)
+    def prepare_context(question):
+        if not isinstance(question, str) or not question.strip():
+            raise ValueError("Informe uma pergunta não vazia.")
 
-if __name__ == "__main__":
-    main()
+        question = question.strip()
+
+        results = search_documents(
+            question=question,
+            vector_store=vector_store
+        )
+
+        context = '\n\n'.join(
+            document.page_content
+            for document, distance in results
+        )
+
+        return {
+            "contexto": context,
+            "pergunta": question
+        }
+
+    chain = (
+        RunnableLambda(prepare_context)
+        | prompt
+        | llm
+        | StrOutputParser()
+    )
+
+    return chain
