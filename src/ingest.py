@@ -43,12 +43,13 @@ def get_existing_chunk_ids(database_url, collection_name):
         engine.dispose()
 
 def ingest_pdf():
-    required_variables = {
+    required_variables = (
         "GOOGLE_API_KEY",
         "EMBEDDING_MODEL",
         "DATABASE_URL",
         "COLLECTION_NAME",
-    }
+        "PDF_PATH"
+    )
 
     for variable in required_variables:
         value = os.getenv(variable)
@@ -56,11 +57,7 @@ def ingest_pdf():
         if not value or not value.strip():
             raise ValueError(f"Configure a variável {variable} no arquivo .env.")
 
-
-    if not PDF_PATH or not PDF_PATH.strip():
-        raise ValueError("Configure a variável PDF_PATH no arquivo .env.");
-
-    pdf_path = Path(PDF_PATH);
+    pdf_path = Path(os.environ["PDF_PATH"]);
 
     if not pdf_path.is_absolute():
         pdf_path = PROJECT_ROOT / pdf_path
