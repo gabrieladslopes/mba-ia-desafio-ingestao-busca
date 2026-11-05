@@ -8,8 +8,9 @@ from hashlib import sha256
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_postgres import PGVector
 from time import sleep
+from sqlalchemy import create_engine, text
 
-PROJECT_ROOT = Path(__file__).parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 load_dotenv(PROJECT_ROOT / ".env")
 
@@ -19,6 +20,27 @@ CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 150
 INGEST_BATCH_SIZE = 10
 INGEST_BATCH_DELAY_SECONDS = 65
+
+def get_existing_chunk_ids(database_url, collection_name):
+    engine = create_engine(database_url)
+
+    query = text("""
+        SELECT e.id
+        FROM langchain_pg_embedding AS e
+        JOIN langchain_pg_collection AS c
+            ON c.uuid = e.collection_id
+        WHERE c.name = :collection_name
+    """)
+
+    try:
+        with engine.connect() as connection:
+            result = connection.execute(
+                query,
+                {"collection_name": collection_name},
+            )
+            return set(result.scalars().all())
+    finally:
+        engine.dispose()
 
 def ingest_pdf():
     required_variables = {
@@ -109,19 +131,40 @@ def ingest_pdf():
         chunk_id = sha256(identity.encode("utf-8")).hexdigest()
         chunk_ids.append(chunk_id)
 
+    existing_ids = get_existing_chunk_ids(
+        database_url=os.environ["DATABASE_URL"],
+        collection_name=os.environ["COLLECTION_NAME"]
+    )
+
+    current_ids = set(chunk_ids)
+
+    pending_chunks = []
+    pending_ids = []
+
+    for chunk, chunk_id in zip(chunks, chunk_ids):
+        if chunk_id not in existing_ids:
+            pending_chunks.append(chunk)
+            pending_ids.append(chunk_id)
+
+    reused_chunks = len(chunks) - len(pending_chunks)
+
+    print(f"Chunks reaproveitados: {reused_chunks}")
+    print(f"Chunks pendentes: {len(pending_chunks)}")
+
     total_batches = (
-        len(chunks) + INGEST_BATCH_SIZE - 1
+        len(pending_chunks) + INGEST_BATCH_SIZE - 1
     ) // INGEST_BATCH_SIZE
 
     processed_chunks = 0
 
     for batch_number, start in enumerate(
-        range(0, len(chunks), INGEST_BATCH_SIZE),
+        range(0, len(pending_chunks), INGEST_BATCH_SIZE),
         start=1,
     ):
         end = start + INGEST_BATCH_SIZE
-        batch_chunks = chunks[start:end]
-        batch_ids = chunk_ids[start:end]
+
+        batch_chunks = pending_chunks[start:end]
+        batch_ids = pending_ids[start:end]
 
         print(
             f"Processando lote {batch_number}/{total_batches}: {len(batch_chunks)} chunks.",
@@ -136,7 +179,7 @@ def ingest_pdf():
         processed_chunks += len(saved_ids)
 
         print(
-            f"Progresso: {processed_chunks}/{len(chunks)} chunks.",
+            f"Progresso: {processed_chunks}/{len(pending_chunks)} chunks pendentes.",
             flush=True
         )
 
@@ -148,8 +191,21 @@ def ingest_pdf():
 
             sleep(INGEST_BATCH_DELAY_SECONDS)
 
+    obsolete_ids = existing_ids - current_ids
+
+    if obsolete_ids:
+        print(f"Removendo {len(obsolete_ids)} chunks desatualizados...")
+
+        vector_store.delete(
+            ids=list(obsolete_ids),
+            collection_only=True
+        )
+
     print(
-        f"Ingestão concluída: {processed_chunks} chunks processados na coleção '{os.environ['COLLECTION_NAME']}'."
+        f"Ingestão concluída: {len(chunks)} chunks na versão atual; "
+        f"{reused_chunks} chunks reaproveitados; " 
+        f"{processed_chunks} chunks adicionados; "
+        f"{len(obsolete_ids)} chunks removidos."
     )
 
 if __name__ == "__main__":
